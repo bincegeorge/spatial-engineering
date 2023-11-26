@@ -1,5 +1,14 @@
 import os
 import csv
+import pyproj
+import json
+import urllib3
+import requests
+
+wgs84 = pyproj.CRS("EPSG:4326")
+utm29n = pyproj.CRS("EPSG:32629")
+
+transformer = pyproj.Transformer.from_crs(wgs84, utm29n, always_xy=True)
 
 def check_csv_file_path(file_path):
     """
@@ -54,6 +63,78 @@ def generate_summary(input_csv):
     return summaries
 
 
+def reproject_coordinates(input_csv):
+    with open(input_csv, 'r', newline='') as infile:
+        reader = csv.reader(infile)
+        header = next(reader)
+
+        event_id_index = header.index('event-id')
+        lon_index = header.index('location-long')
+        lat_index = header.index('location-lat')
+
+        reprojected_coordinates = []
+
+        for row in reader:
+            event_id = row[event_id_index]
+            longitude, latitude = float(row[lon_index]), float(row[lat_index])
+
+            easting, northing = transformer.transform(longitude, latitude)
+
+            reprojected_coordinates.append({
+                'Event ID': event_id,
+                'Original Coordinates (WGS 84)': {'Longitude': longitude, 'Latitude': latitude},
+                'Reprojected Coordinates (UTM zone 29N)': {'Easting': easting, 'Northing': northing}
+            })
+    return reprojected_coordinates
+
+
+# Function to add landcover strata to each row in the CSV file
+def add_landcover_to_csv(input_csv, output_csv, batch_size=1000):
+    with open(input_csv, 'r') as infile, open(output_csv, 'w', newline='') as outfile:
+        csv_reader = csv.reader(infile)
+        csv_writer = csv.writer(outfile)
+
+        # Write the header to the output CSV file
+        header = next(csv_reader)
+        csv_writer.writerow(header + ['landcover'])
+
+        # Process the CSV file in batches
+        for batch_num, batch_rows in enumerate(zip(*[csv_reader] * batch_size)):
+            print(f"Processing batch {batch_num + 1}")
+            for row in batch_rows:
+                lon, lat = float(row[3]), float(row[4])
+                landcover = get_landcover_strata(lon, lat)
+                row.append(landcover)
+                csv_writer.writerow(row)
+
+
+# Function to get landcover strata for a given coordinate
+def get_landcover_strata(lon, lat):
+    try:
+        url = 'https://gip.itc.utwente.nl/services/lulc/lulc.py?'
+        params = {'request': 'getValues', 'coords': f'{lon},{lat}'}
+
+        response = requests.get(url, params=params)
+
+        if response.status_code == 200:
+            data = response.json()
+            landcover_values = data.get('data', [])
+
+            # Assuming you want the first value from the list
+            if landcover_values:
+                return landcover_values[0]
+            else:
+                print(f"No landcover values found in the response")
+                return None
+        else:
+            print(f"Request failed with status code {response.status_code}: {response.text}")
+            return None
+    except (KeyError, IndexError):
+        print(f"Invalid response format: {response.text}")
+        return None
+
+
+
 def main():
     # task 1.1
     # Using CSV reader to read the file and print it.
@@ -93,6 +174,31 @@ def main():
     summaries = generate_summary(input_file)
     for summary in summaries:
         print(summary)
+
+    # task 2.1
+    reprojected_coords = reproject_coordinates(input_file)
+    for coords in reprojected_coords:
+        print(f"Event ID: {coords['Event ID']}")
+        print(
+            f"Original Coordinates (WGS 84): Longitude = {coords['Original Coordinates (WGS 84)']['Longitude']}, Latitude = {coords['Original Coordinates (WGS 84)']['Latitude']}")
+        print(
+            f"Reprojected Coordinates (UTM zone 29N): Easting = {coords['Reprojected Coordinates (UTM zone 29N)']['Easting']}, Northing = {coords['Reprojected Coordinates (UTM zone 29N)']['Northing']}")
+        print()
+
+    # task 2.2
+    base_url = "https://gip.itc.utwente.nl/services/lulc/lulc.py?"
+    # http = urllib3.PoolManager()
+    url = base_url + "request=getLegend"
+    print(url)
+    # response = http.request("GET", url)
+    response = requests.get(url)
+    data = json.loads(response.text)  # Converts the JSON response into a dictionary
+    classes = data["data"]  # Extracts value associated to the key "data"
+    print("Legend", classes)
+
+    input_csv_path = 'output.csv'
+    output_csv_path = 'output_with_landcover_2.csv'
+    add_landcover_to_csv(input_csv_path, output_csv_path, batch_size=1000)
 
 
 if __name__ == '__main__':
